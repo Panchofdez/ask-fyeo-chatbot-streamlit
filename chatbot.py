@@ -23,7 +23,7 @@ def setup():
 
 def authenticate(url):
     try:
-        print("AUTHENTICATE")
+        # print("AUTHENTICATE")
         resp = requests.post(url, json={ "email": st.secrets["email"], "password": st.secrets["password"]})
         resp.raise_for_status()
         token = resp.json()["token"]
@@ -35,7 +35,7 @@ def authenticate(url):
 @st.cache_data
 def get_data(url, token):
     try:
-        print("RETRIEVE DATA")
+        # print(f"RETRIEVE DATA: {url}")
         resp = requests.get(url, headers={"authorization" : f"Bearer {token}"})
         resp.raise_for_status()
         data = resp.json()     
@@ -44,18 +44,34 @@ def get_data(url, token):
         print("ERROR: ", e)
         
 @st.cache_data
-def get_pattern_embeddings(_transformer_model, patterns):      
-    print("GET PATTERNS")  
-    return transformer_model.encode(patterns)
+def get_pattern_embeddings(_transformer_model, patterns, data_type):      
+    # print(f"GET PATTERNS FOR {data_type}")  
+    return _transformer_model.encode(patterns)
 
 @st.cache_resource            
 def load_transformer_model():
-    print("LOAD MODEL")
+    # print("LOAD MODEL")
     return SentenceTransformer("multi-qa-mpnet-base-cos-v1")
 
 @st.cache_resource            
 def load_stemmer_model():
     return PorterStemmer() 
+
+def process_faq_data(faq_data):
+    all_patterns = []
+    pattern_tag_map = {}
+
+    for faq in faq_data:
+        tag = faq["tag"]
+        patterns = faq["patterns"]
+
+        for sent in patterns:
+            clean_sent = remove_punc(sent.lower())
+            pattern_tag_map[clean_sent] = tag
+            all_patterns.append(clean_sent)  
+
+    return all_patterns, pattern_tag_map
+
 
 def analyze_faq(pattern_tag_map, all_patterns, pattern_embeddings):
 
@@ -115,33 +131,25 @@ def check_response(tag, patterns, question, response, stemmer):
         stemmed_words = [stemmer.stem(w) for w in question]
 
     found = [ w for w in stemmed_words if re.search(w, response) or re.search(w,tag ) != None or re.search(w, patterns)] #check if the question has words related in the response
-    print("FOUND", found)
+    # print("FOUND", found)
     return len(found) > 0
     
-def get_response(query, transformer_model, stemmer_model, data, pattern_embeddings, all_patterns):
+def get_response(query, transformer_model, stemmer_model, data, pattern_embeddings, all_patterns, pattern_tag_map):
     default_answer = ("", "Hmm... I do not understand that question. If I cannot answer your question you can email firstyeareng@torontomu.ca or stop by our office (located: ENG340A) Monday to Friday from 9 am to 4 pm. Please try again or ask a different question.")
     query = remove_punc(query.lower())
-    print("QUERY:", query)
+    # print("QUERY:", query)
     query_embedding = transformer_model.encode(query)    
 
     # similarity = self.sentence_transformer_model.similarity(query_embedding, pattern_embeddings)
-    # print("SIMILARITY", similarity)
     scores = util.dot_score(query_embedding, pattern_embeddings)[0].cpu().tolist()
     
-    pattern_score_pairs = list(zip(all_patterns, scores))
-    
     #Sort by decreasing score
-    pattern_score_pairs = sorted(pattern_score_pairs, key=lambda x: x[1], reverse=True)
+    pattern_score_pairs = sorted(list(zip(all_patterns, scores)), key=lambda x: x[1], reverse=True)
 
-    # #Output passages & scores
-    # print("DOT SCORE")
-    # for pattern, score in pattern_score_pairs[:20]:
-    #     print(score, pattern)
-        
     target_pattern, target_score = pattern_score_pairs[0]
     target_tag = pattern_tag_map[target_pattern]
     result = (target_tag, target_pattern, target_score)
-    print("RESULT",result)
+    # print("RESULT",result)
     
     if target_score > 0.7:
         for faq in data :
@@ -167,7 +175,6 @@ def start_conversation(url):
         resp.raise_for_status() 
         data = resp.json()
         conversation = data["conversation"]
-        # print("CONVERSATION", conversation)
         st.session_state.conversation_id = conversation["id"] 
     except Exception as e:
         print("ERROR: ", e)
@@ -187,7 +194,6 @@ def chatbot_answer(url, query, tag, response):
         resp.raise_for_status() 
         data = resp.json()
         query = data["query"]
-        # print("QUERY", query)
         st.session_state.query_id = query["id"] 
     except Exception as e:
         print("ERROR: ", e)
@@ -204,14 +210,12 @@ def resolve_query(url):
             resp.raise_for_status() 
             data = resp.json()
             query = data["query"]
-            # print("QUERY", query)
     except Exception as e:
         print("ERROR: ", e)
 
     
 
 def form_callback():
-    # print("FORM: ", st.session_state.form_student_number, st.session_state.form_first_name, st.session_state.form_last_name, st.session_state.form_program, st.session_state.form_email)
     if not st.session_state.form_student_number or not st.session_state.form_first_name or not st.session_state.form_last_name or not st.session_state.form_program or not st.session_state.form_email:
         st.session_state.form_error = f":red[Error: Missing Information]" 
     
@@ -222,6 +226,26 @@ def form_callback():
         st.session_state.form_error = f":red[Error: Invalid Email]"
         
     else:    
+        start_conversation(f"{st.session_state.url}/chat/start")
+        st.session_state.student_number = st.session_state.form_student_number
+        st.session_state.first_name = st.session_state.form_first_name
+        st.session_state.last_name = st.session_state.form_last_name
+        st.session_state.program = st.session_state.form_program
+        st.session_state.email = st.session_state.form_email
+        st.session_state.conversation_mode = True
+
+def staff_form_callback():
+    if not st.session_state.form_first_name or not st.session_state.form_last_name or not st.session_state.form_email or not st.session_state.form_staff_password:
+        st.session_state.form_error = f":red[Error: Missing Information]"
+    
+    elif st.session_state.form_email.find("@") == -1 or st.session_state.form_email.lower().split("@")[1]  != "ryerson.ca" and st.session_state.form_email.lower().split("@")[1] != "torontomu.ca":
+        st.session_state.form_error = f":red[Error: Invalid Email]"
+    
+    elif st.session_state.form_staff_password != st.secrets["password"]:
+        st.session_state.form_error = f":red[Error: Invalid Password]"    
+    else:    
+        st.session_state.form_student_number = "None"
+        st.session_state.form_program = "None"
         start_conversation(f"{st.session_state.url}/chat/start")
         st.session_state.student_number = st.session_state.form_student_number
         st.session_state.first_name = st.session_state.form_first_name
@@ -259,33 +283,24 @@ def write_stream(stream):
             
 setup()
 
-# print("HELLO WORLD")
 if "url" not in st.session_state: 
     st.session_state.url = "https://ask-fyeo-chatbot-68o6.onrender.com"
+    # st.session_state.url = "http://localhost:80" # for development
     
 if "token" not in st.session_state:
     st.session_state.token = authenticate(f"{st.session_state.url}/login")
 
+student_faq = get_data(f"{st.session_state.url}/faq", st.session_state.token)
+staff_faq = get_data(f"{st.session_state.url}/faq?for_staff=true", st.session_state.token)
 
-data = get_data(f"{st.session_state.url}/faq", st.session_state.token)
-
-pattern_tag_map = {}
-all_patterns = []
-
-for faq in data:
-    tag = faq["tag"]
-    patterns = faq["patterns"]
-
-    for sent in patterns:
-        clean_sent = remove_punc(sent.lower())
-        pattern_tag_map[clean_sent] = tag
-        all_patterns.append(clean_sent)    
+student_patterns, student_pattern_tag_map  = process_faq_data(student_faq)
+staff_patterns, staff_pattern_tag_map  = process_faq_data(staff_faq)
 
 transformer_model = load_transformer_model()
 stemmer_model = load_stemmer_model()
 
-pattern_embeddings = get_pattern_embeddings(transformer_model, all_patterns)
-# analyze_faq(pattern_tag_map, all_patterns, pattern_embeddings)
+student_pattern_embeddings = get_pattern_embeddings(transformer_model, student_patterns, "student")
+staff_pattern_embeddings = get_pattern_embeddings(transformer_model, staff_patterns, "staff")
 
 hide_streamlit_style = """
             <style>
@@ -313,28 +328,53 @@ if "feedback_mode" not in st.session_state:
     st.session_state.feedback_mode = False    
     
 if "form_error" not in st.session_state:
-    st.session_state.form_error = ""    
+    st.session_state.form_error = ""  
+
+if 'staff_mode' not in st.session_state:
+    st.session_state.staff_mode = False  
 
 if not st.session_state.conversation_mode:
-    with st.form("student_details", clear_on_submit = True):
-        student_number = st.text_input("Student Number", key="form_student_number")
-        first_name = st.text_input("First Name", key="form_first_name")
-        last_name = st.text_input("Last Name", key="form_last_name")
-        program = st.selectbox(
-            "Select Program",
-            ("Aerospace", "Biomedical", "Chemical", "Civil", "Computer", "Electrical" , "Industrial", "Mechanical" ),
-            key="form_program"
-        )
-  
-        email = st.text_input("Email", key="form_email")
+    options = ["Student", "Staff"]
+    selection = st.segmented_control(
+        "Choose mode", options, selection_mode="single", default=options[0], label_visibility="collapsed"
+    )
+    if selection == options[1]:
+        st.session_state.staff_mode = True
+    else:
+        st.session_state.staff_mode = False
 
-        if st.session_state.form_error:
-            st.write(st.session_state.form_error)    
-        # Every form must have a submit button.
-        submitted = st.form_submit_button("Submit" , on_click=form_callback)         
+    if st.session_state.staff_mode:
+        with st.form("staff_details", clear_on_submit = True):
+            first_name = st.text_input("First Name", key="form_first_name")
+            last_name = st.text_input("Last Name", key="form_last_name")
+            email = st.text_input("Email", key="form_email")
+            staff_password = st.text_input("Staff Password", key="form_staff_password")
+
+            if st.session_state.form_error:
+                st.write(st.session_state.form_error)    
+            # st.session_state.staff_mode = st.toggle("Staff")
+            submitted = st.form_submit_button("Submit" , on_click=staff_form_callback)    
+
+    else:
+        with st.form("student_details", clear_on_submit = True):
+            student_number = st.text_input("Student Number", key="form_student_number")
+            first_name = st.text_input("First Name", key="form_first_name")
+            last_name = st.text_input("Last Name", key="form_last_name")
+            program = st.selectbox(
+                "Select Program",
+                ("Aerospace", "Biomedical", "Chemical", "Civil", "Computer", "Electrical" , "Industrial", "Mechanical" ),
+                key="form_program"
+            )
+    
+            email = st.text_input("Email", key="form_email")
+
+            if st.session_state.form_error:
+                st.write(st.session_state.form_error)    
+            
+            submitted = st.form_submit_button("Submit" , on_click=form_callback)
+            
           
 elif st.session_state.conversation_mode:
-    # print(st.session_state.student_number, st.session_state.first_name, st.session_state.last_name, st.session_state.program, st.session_state.email)
     # Initialize chat history
     if "messages" not in st.session_state:
         st.session_state.messages = []
@@ -353,8 +393,10 @@ elif st.session_state.conversation_mode:
         # Display user message in chat message container
         with st.chat_message("user"):
             st.markdown(prompt)
-        
-        tag, response = get_response(prompt, transformer_model, stemmer_model, data, pattern_embeddings, all_patterns)
+        if st.session_state.staff_mode:
+            tag, response = get_response(prompt, transformer_model, stemmer_model, staff_faq, staff_pattern_embeddings, staff_patterns, staff_pattern_tag_map)
+        else:
+            tag, response = get_response(prompt, transformer_model, stemmer_model, student_faq, student_pattern_embeddings, student_patterns, student_pattern_tag_map)
         chatbot_answer(f"{st.session_state.url}/chat/answer", prompt, tag, response)
             
         # Display assistant response in chat message container
